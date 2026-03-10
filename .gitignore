@@ -1,20 +1,23 @@
-# Entornos virtuales
-venv/
+# Entornos Virtuales
 env/
-__pycache__/
+venv/
+.venv/
+ENV/
 
-# Archivos de logs y auditoría
-*.log
-*.txt
-AUDIT_*.txt
-
-# Archivos de estado y cachés futuros
-*.parquet
-*.json
-
-# Configuraciones locales
+# Archivos de Configuración Sensible (Contraseñas)
 .env
 
-# Ignorar archivos temporales de Office
-~$*.xlsx
-~$*.docx
+# Archivos Temporales de Polars y ETL
+temp_processing/
+ESTRUCTURA_PROYECTO.txt
+estado_etl.json
+
+# Cache de Python
+**/__pycache__/
+*.py[cod]
+
+# Logs y Reportes
+logs/
+*.csv
+*.xlsx
+*.docx

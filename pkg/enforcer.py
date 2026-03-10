@@ -1,22 +1,26 @@
 """
-enforcer.py
-
 Módulo de Integridad Estructural y Tipado (Schema Enforcement).
-Garantiza que el DataFrame cumpla estrictamente con el contrato (DDL) de SQL Server,
-aplicando Safe Casting y truncamiento dinámico para prevenir colapsos en la base de datos.
+
+Garantiza que el lote de datos cumpla estrictamente con el contrato DDL
+de la base de datos destino (SQL Server). Aplica conversiones de tipo
+seguras (Safe Casting) y truncamiento dinámico de cadenas para prevenir
+desbordamientos y colapsos de integridad referencial.
 """
+
 from typing import Any, Dict
+
 import polars as pl
 
-# Catálogo de longitudes máximas fundamentado en el DDL de SQL Server.
-# Actúa como barrera contra errores de truncamiento (String Truncation Errors).
-LIMITES_LONGITUD = {
+# Catálogo de longitudes máximas para mapeo DDL.
+# Define la barrera de seguridad contra errores de truncamiento (String Truncation Errors).
+LIMITES_LONGITUD: Dict[str, int] = {
     "UUID": 36,
     "EMISORRFC": 13,
     "RECEPTORRFC": 13,
     "MONEDA": 10,
     "TIPOCAMBIO": 10,
     "TIPODECOMPROBANTE": 10,
+    "TIPOCONTRIBUYENTE": 10,
     "SERIE": 50,
     "FOLIO": 50,
     "FORMAPAGO": 5,
@@ -25,7 +29,6 @@ LIMITES_LONGITUD = {
     "CONCEPTOCLAVEPRODSERV": 20,
     "CONCEPTOUNIDAD": 50,
     "CONCEPTODESCRIPCION": 1000,
-    # Límites de seguridad para campos VARCHAR(MAX) del Anexo 1A
     "NOCERTIFICADO": 500,
     "CONDICIONESDEPAGO": 500,
     "LUGAREXPEDICION": 500,
@@ -37,33 +40,40 @@ LIMITES_LONGITUD = {
 
 def estandarizar_nombres_columnas(df: pl.DataFrame) -> pl.DataFrame:
     """
-    Sanitiza los identificadores de columna eliminando caracteres invisibles 
-    y comillas, preservando la capitalización original para coincidir con el DDL.
+    Sanitiza los identificadores de columna eliminando caracteres anómalos.
+
+    Remueve saltos de línea y comillas para prevenir errores de sintaxis
+    en las sentencias dinámicas de SQL, preservando la capitalización original.
 
     Args:
-        df (pl.DataFrame): DataFrame con encabezados originales.
+        df (pl.DataFrame): DataFrame con encabezados crudos.
 
     Returns:
-        pl.DataFrame: DataFrame con identificadores sanitizados.
+        pl.DataFrame: DataFrame con la estructura de columnas sanitizada.
     """
     nuevas_columnas = [
         col.strip().replace("\n", "").replace('"', '').replace("'", "")
         for col in df.columns
     ]
+    
     return df.rename(dict(zip(df.columns, nuevas_columnas)))
 
 
 def aplicar_tipos_seguros(df: pl.DataFrame, reglas_tipos: Dict[str, Any]) -> pl.DataFrame:
     """
-    Aplica coerciones de tipo tolerantes a fallos y limita la longitud de las 
-    cadenas de texto basándose en los metadatos de la base de datos.
+    Aplica coerciones de tipo tolerantes a fallos y limita la longitud de texto.
+
+    Ejecuta un mapeo basado en metadatos para transformar el DataFrame al 
+    tipado esperado por SQL Server. Utiliza el modo estricto desactivado 
+    (strict=False) para convertir valores corruptos inmanejables en nulos 
+    analíticos, evitando la detención del pipeline.
 
     Args:
         df (pl.DataFrame): Lote de datos normalizado.
-        reglas_tipos (Dict[str, Any]): Diccionario maestro de mapeo de tipos.
+        reglas_tipos (Dict[str, Any]): Diccionario de mapeo de tipos destino.
 
     Returns:
-        pl.DataFrame: DataFrame tipado y truncado a los límites del DDL.
+        pl.DataFrame: DataFrame tipado y truncado estructuralmente.
     """
     if df.is_empty():
         return df
@@ -74,11 +84,12 @@ def aplicar_tipos_seguros(df: pl.DataFrame, reglas_tipos: Dict[str, Any]) -> pl.
     for col in df.columns:
         col_up = col.upper()
 
-        # 1. Aplicación de Safe Casting guiada por el diccionario maestro
+        # Bloque de Coerción Segura (Safe Casting)
         if col_up in reglas_tipos:
             dtype_destino = reglas_tipos[col_up]
 
             if dtype_destino == pl.Datetime:
+                # Truncamiento previo para alinear con el formato ISO-8601 base
                 expr = (
                     pl.col(col)
                     .str.slice(0, 19)
@@ -86,6 +97,7 @@ def aplicar_tipos_seguros(df: pl.DataFrame, reglas_tipos: Dict[str, Any]) -> pl.
                     .alias(col)
                 )
             elif dtype_destino == pl.Float64:
+                # Sanitización numérica pre-conversión
                 expr = (
                     pl.col(col)
                     .str.replace_all(",", "")
@@ -98,7 +110,7 @@ def aplicar_tipos_seguros(df: pl.DataFrame, reglas_tipos: Dict[str, Any]) -> pl.
 
             expresiones.append(expr)
 
-        # 2. Control de Longitud para columnas de texto restantes (Varchar)
+        # Bloque de Control de Longitud (Varchar Enforcement)
         elif df.schema[col] == pl.Utf8:
             limite = LIMITES_LONGITUD.get(col_up, 1000)
             expr = pl.col(col).str.slice(0, limite).alias(col)

@@ -1,31 +1,71 @@
-import time
-from pathlib import Path
+"""
+Módulo de utilidad de pre-vuelo: Contador de volumetría física de alta velocidad.
 
-def contar_lineas_rapido(ruta_archivo):
-    print(f"Iniciando conteo forense de: {ruta_archivo}")
-    print("Por favor espera, leyendo directamente del disco...")
+Calcula la cantidad exacta de registros físicos (saltos de línea) en un
+archivo crudo masivo (TXT/CSV). Utiliza lectura de buffer en modo binario 
+para evadir la decodificación de caracteres corruptos (Mojibake) y evitar 
+el desbordamiento de memoria RAM durante la auditoría.
+"""
+
+import sys
+import time
+
+from pkg.globals import SAT_RAW_DIR
+
+
+def contar_lineas_rapido(nombre_archivo: str) -> None:
+    """
+    Ejecuta el escaneo de volumetría física sobre el archivo crudo.
+
+    Args:
+        nombre_archivo (str): Nombre físico del archivo con extensión.
+
+    Raises:
+        SystemExit: Si el archivo no existe o hay un error de I/O en la lectura.
+    """
+    archivo_sat = SAT_RAW_DIR / nombre_archivo
+
+    print("\n[INFO] Iniciando conteo forense de volumetría física...")
+    print(f"[INFO] Archivo objetivo: {archivo_sat.name}")
+    
+    if not archivo_sat.exists():
+        print(f"[ERROR] Archivo no localizado en el directorio fuente: {archivo_sat.parent}")
+        sys.exit(1)
+
+    print("[INFO] Lectura de buffer binario en curso. Por favor espere...")
     
     start_time = time.time()
     contador = 0
     
+    # Lectura en modo binario (rb) para evadir el motor de decodificación
+    # y optimizar I/O, previniendo excepciones por caracteres anómalos.
     try:
-        with open(ruta_archivo, 'rb') as f:
-            for _ in f:
+        with open(archivo_sat, "rb") as file:
+            for _ in file:
                 contador += 1
-    except FileNotFoundError:
-        print("¡Archivo no encontrado! Revisa la ruta.")
-        return
+    except Exception as e:
+        print(f"[CRITICAL ERROR] Interrupción I/O durante la lectura: {e}")
+        sys.exit(1)
 
     end_time = time.time()
     minutos = (end_time - start_time) / 60
+    segundos = (end_time - start_time) % 60
     
-    print(f"✅ ¡Conteo finalizado!")
-    print(f"📊 Total de filas: {contador:,.0f}")
-    print(f"⏱️ Tiempo que tomó: {minutos:.2f} minutos\n")
+    print("[INFO] Escaneo volumétrico finalizado con éxito.")
+    print(f"[RESULTADO] Total de filas físicas detectadas: {contador:,.0f}")
+    
+    if minutos >= 1:
+        print(f"[INFO] Tiempo de ejecución: {int(minutos)} min y {segundos:.2f} seg\n")
+    else:
+        print(f"[INFO] Tiempo de ejecución: {segundos:.2f} segundos\n")
 
 
-ruta_csv = r"\\sia\AECF\DGATIC\LOTA\Bases de Datos\SAT\GERG_AECF_1891_Anexo2B.csv"
-ruta_txt_qa = r"\\sia\AECF\DGATIC\LOTA\Bases de Datos\SAT\GERG_AECF_1891_Anexo2B-QA.txt" 
-
-#contar_lineas_rapido(ruta_csv)
-contar_lineas_rapido(ruta_txt_qa) 
+if __name__ == "__main__":
+    # Análisis de argumentos por interfaz de línea de comandos (CLI)
+    if len(sys.argv) < 2:
+        print("[WARN] Uso de CLI incorrecto.")
+        print("[INFO] Sintaxis esperada: python contador.py <nombre_del_archivo>")
+        print("[INFO] Ejemplo: python contador.py AECF_0129_Anexo1_TablaB.csv")
+    else:
+        archivo_objetivo = sys.argv[1]
+        contar_lineas_rapido(archivo_objetivo)

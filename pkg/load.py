@@ -1,32 +1,54 @@
 """
-load.py
+Módulo de persistencia masiva y carga idempotente (Upsert).
 
-Motor de Persistencia Masiva y Carga Idempotente (Upsert).
-Implementa de-duplicación interna por lote y validación contra tabla destino
-para garantizar integridad referencial en cargas masivas de alto volumen.
+Implementa la arquitectura de Staging-to-Production para garantizar cargas
+masivas de alto volumen hacia SQL Server. Ejecuta rutinas de de-duplicación 
+intra-lote (Window Functions) y validación transaccional contra la tabla destino
+para mantener la integridad referencial absoluta.
 """
+
 import polars as pl
 from sqlalchemy import create_engine, text
+
 from pkg.config import get_connection_string
 
-# Inicializamos el motor SQLAlchemy con fast_executemany para máximo rendimiento en SQL Server
+# Inicialización global del motor de conexión.
+# El parámetro fast_executemany es crítico para habilitar la inserción
+# masiva en bloque (Bulk Insert) a nivel del driver ODBC.
 engine = create_engine(get_connection_string(), fast_executemany=True)
+
 
 def upload_to_sql_blindado(df: pl.DataFrame, table_name: str, anexo_id: str) -> None:
     """
-    Ejecuta una carga masiva hacia SQL Server con limpieza de duplicados en el origen
-    y validación de existencia en el destino.
+    Ejecuta una carga transaccional hacia SQL Server con resolución de conflictos.
+
+    Implementa un patrón ELT (Extract, Load, Transform) volcando el bloque de
+    memoria a una tabla temporal (Staging). Posteriormente, ejecuta sentencias
+    SQL nativas para de-duplicar los registros físicamente leídos y descartar
+    aquellos que ya existen en el Data Warehouse.
+
+    Args:
+        df (pl.DataFrame): Lote de datos normalizado y tipado.
+        table_name (str): Nombre de la tabla destino en producción.
+        anexo_id (str): Identificador del flujo para aplicar reglas específicas de llave primaria.
+
+    Raises:
+        ValueError: Si el anexo proporcionado no tiene una estrategia de Upsert definida.
     """
     if df.is_empty():
         return
 
     stg_table = f"STG_{table_name}"
 
-    # 1. Asegurar limpieza de Staging
+    # Limpieza preventiva del área de Staging para evitar colisiones
+    # entre hilos de ejecución o cargas previas abortadas.
     with engine.begin() as conn:
-        conn.execute(text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL TRUNCATE TABLE {stg_table};"))
+        conn.execute(
+            text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL TRUNCATE TABLE {stg_table};")
+        )
 
-    # 2. Volcado Masivo a Staging (Se lleva la columna FilaOrigen temporalmente)
+    # Volcado masivo a Staging. La columna técnica 'FilaOrigen' se transfiere
+    # temporalmente para permitir el ordenamiento determinista en base de datos.
     df.write_database(
         table_name=stg_table,
         connection=engine,
@@ -34,16 +56,14 @@ def upload_to_sql_blindado(df: pl.DataFrame, table_name: str, anexo_id: str) -> 
         engine="sqlalchemy"
     )
 
-    # 3. Operación de Upsert con De-duplicación Interna
+    # Resolución transaccional y mezcla (Merge)
     with engine.begin() as conn:
-        
-        # Filtramos FilaOrigen para NO intentar insertarla en la tabla final
+        # Aislamiento de columnas reales (excluyendo FilaOrigen) para la inserción final
         cols_destino = [col for col in df.columns if col != "FilaOrigen"]
         columnas_insert = ", ".join([f"[{col}]" for col in cols_destino])
-        
-        if anexo_id == "1A":
-            # De-duplicación por UUID para Anexo 1A
-            # Ordenamos por FilaOrigen para que, si hay repetidos, siempre elija el primero determinísticamente
+
+        if anexo_id.startswith("1A"):
+            # Estrategia Anexo 1A (Cabeceras): De-duplicación fundamentada en el UUID.
             upsert_query = f"""
                 INSERT INTO {table_name} ({columnas_insert})
                 SELECT {columnas_insert} FROM (
@@ -52,17 +72,17 @@ def upload_to_sql_blindado(df: pl.DataFrame, table_name: str, anexo_id: str) -> 
                 ) AS Stg
                 WHERE rn = 1
                 AND NOT EXISTS (
-                    SELECT 1 FROM {table_name} AS Dest 
+                    SELECT 1 FROM {table_name} AS Dest
                     WHERE Dest.UUID = Stg.UUID
                 );
             """
-        
-        elif anexo_id == "2B":
-            # De-duplicación por HashID calculado para Anexo 2B
-            # INYECCIÓN DEL BOOKMARK: Agregamos [FilaOrigen] al HASHBYTES para asegurar fidelidad del SAT
+
+        elif anexo_id.startswith("2B"):
+            # Estrategia Anexo 2B (Detalles): De-duplicación y generación de llave sintética.
+            # Dado que el SAT no provee ID de detalle, se calcula un Hash SHA-256 compuesto.
             upsert_query = f"""
                 WITH CalculoHash AS (
-                    SELECT 
+                    SELECT
                         CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', CONCAT([UUID], '|', [ConceptoClaveProdServ], '|', [ConceptoImporte], '|', [FilaOrigen])), 2) as NewHash,
                         *
                     FROM {stg_table}
@@ -76,12 +96,17 @@ def upload_to_sql_blindado(df: pl.DataFrame, table_name: str, anexo_id: str) -> 
                 FROM Unicos
                 WHERE rn = 1
                 AND NOT EXISTS (
-                    SELECT 1 FROM {table_name} AS Dest 
+                    SELECT 1 FROM {table_name} AS Dest
                     WHERE Dest.HashID = Unicos.NewHash
                 );
             """
+        else:
+            raise ValueError(f"El prefijo del anexo '{anexo_id}' carece de una estrategia de Upsert configurada.")
 
+        # Ejecución del motor transaccional
         conn.execute(text(upsert_query))
-        
-        # 4. Limpieza final
-        conn.execute(text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL DROP TABLE {stg_table};"))
+
+        # Destrucción del área de Staging post-carga
+        conn.execute(
+            text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL DROP TABLE {stg_table};")
+        )

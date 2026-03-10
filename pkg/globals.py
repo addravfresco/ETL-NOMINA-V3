@@ -1,55 +1,101 @@
 """
-globals.py
-Configuración del entorno de ejecución, rutas maestras y reglas de negocio globales.
-Gestiona la infraestructura de memoria para procesamiento Out-of-Core en Polars.
+Módulo de configuración global e infraestructura de ejecución.
+
+Centraliza la gestión de rutas maestras, reglas de negocio estructurales
+y la configuración del entorno de ejecución. Administra explícitamente la
+infraestructura de memoria (Spill-to-Disk) y concurrencia para habilitar
+el procesamiento Out-of-Core en Polars, previniendo desbordamientos de RAM.
 """
+
 import os
 from pathlib import Path
+from typing import Any, Dict
+
 import polars as pl
+from dotenv import load_dotenv
 
-# --- 1. RUTAS E INFRAESTRUCTURA ---
-BASE_DIR = Path(__file__).resolve().parent.parent
-LOG_DIR = BASE_DIR / "logs"
-TEMP_DIR = BASE_DIR / "temp_processing"
-SAT_RAW_DIR = Path(r"\\sia\AECF\DGATIC\LOTA\Bases de Datos\SAT")
+# Inicialización del entorno
+load_dotenv()
 
-for folder in [LOG_DIR, TEMP_DIR]:
+# =============================================================================
+# 1. RUTAS E INFRAESTRUCTURA DE ALMACENAMIENTO
+# =============================================================================
+BASE_DIR: Path = Path(__file__).resolve().parent.parent
+LOG_DIR: Path = BASE_DIR / "logs"
+TEMP_DIR: Path = BASE_DIR / "temp_processing"
+
+# Resolución de ruta de ingesta cruda con fallback de seguridad
+ruta_sat_env = os.getenv("SAT_RAW_DIR", str(BASE_DIR / "data_fallback"))
+SAT_RAW_DIR: Path = Path(ruta_sat_env)
+
+# Aprovisionamiento automático de directorios operativos
+for folder in (LOG_DIR, TEMP_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
-# --- 2. GESTIÓN DE MEMORIA Y RENDIMIENTO ---
-# Redireccionamiento crítico para evitar desbordamiento de RAM en la unidad C:
-DISCO_TRABAJO = Path(r"D:\SAT\ETL_TEMP")
+# =============================================================================
+# 2. GESTIÓN AVANZADA DE MEMORIA Y RENDIMIENTO (POLARS)
+# =============================================================================
+# Definición y aprovisionamiento del disco de trabajo para operaciones Out-of-Core
+ruta_temp_env = os.getenv("ETL_TEMP_DIR", r"C:\Temp_Polars")
+DISCO_TRABAJO: Path = Path(ruta_temp_env)
 DISCO_TRABAJO.mkdir(parents=True, exist_ok=True)
 
+# Redirección de los buffers de memoria virtual al disco de trabajo
 os.environ["POLARS_TEMP_DIR"] = str(DISCO_TRABAJO)
 os.environ["TMPDIR"] = str(DISCO_TRABAJO)
 os.environ["TEMP"] = str(DISCO_TRABAJO)
 os.environ["TMP"] = str(DISCO_TRABAJO)
 
-# Limitación de concurrencia para evitar bloqueos por CPU
+# Restricción de concurrencia para evitar bloqueos por saturación de CPU
 os.environ["POLARS_MAX_THREADS"] = "4"
+
+# Configuración de visualización estándar para auditoría en consola
 pl.Config.set_tbl_rows(20)
 pl.Config.set_fmt_str_lengths(50)
 
-BATCH_SIZE = 100_000
+# Límite de ingesta por lote transaccional
+BATCH_SIZE: int = 100_000
 
-# --- 3. DICCIONARIO MAESTRO DE TABLAS ---
-TABLES_CONFIG = {
+# =============================================================================
+# 3. DICCIONARIO MAESTRO DE ORQUESTACIÓN (TABLES_CONFIG)
+# =============================================================================
+TABLES_CONFIG: Dict[str, Dict[str, str]] = {
     "1A": {
         "file_name": "GERG_AECF_1891_Anexo1A-QA.txt",
-        "table_name": "ANEXO_1A_2025_1S_TEST_V2",    #"ANEXO_1A_2025_1S"
+        "table_name": "ANEXO_1A_2025_1S",
         "separator": "|"
     },
     "2B": {
         "file_name": "GERG_AECF_1891_Anexo2B.csv",
         "table_name": "ANEXO_2B_2025_1S",
         "separator": "|"
+    },
+    "1A_2024": {
+        "file_name": "AECF_0101_Anexo1.csv",
+        "table_name": "ANEXO_1A_2024",
+        "separator": "|"
+    },
+    "2B_2024": {
+        "file_name": "AECF_0101_Anexo2.csv",
+        "table_name": "ANEXO_2B_2024",
+        "separator": "|"
+    },
+    "1A_2025_2S": {
+        "file_name": "AECF_0129_Anexo1_TablaA.csv.csv",
+        "table_name": "ANEXO_1A_2025_2S",
+        "separator": "|"
+    },
+    "2B_2025_2S": {
+        "file_name": "AECF_0129_Anexo1_TablaB.csv.csv",
+        "table_name": "ANEXO_2B_2025_2S",
+        "separator": "|"
     }
 }
 
-# --- 4. REGLAS DE TIPADO DINÁMICO ---
-# Catálogo estricto de tipos para enforcement previo a la base de datos.
-REGLAS_DINAMICAS = {
+# =============================================================================
+# 4. REGLAS DE TIPADO DINÁMICO (SCHEMA ENFORCEMENT)
+# =============================================================================
+REGLAS_DINAMICAS: Dict[str, Any] = {
     "UUID": pl.Utf8,
     "EMISORRFC": pl.Utf8,
     "RECEPTORRFC": pl.Utf8,
