@@ -14184,7 +14184,18 @@ REEMPLAZOS_NIVEL_1: Dict[str, str] = {
     "INGRESOS_AMPLIACI\ufffdN": "INGRESOS_AMPLIACIÓN",
     "\ufffd21": "21",
     "AUTENTIFICACI\ufffdN": "AUTENTIFICACIÓN",
-    "REBA\ufffdOS": "REBAÑOS"
+    "REBA\ufffdOS": "REBAÑOS",
+    "COMPA?IA": "COMPAÑIA",
+    "MU?OZ": "MUÑOZ",
+    "NU?EZ": "NUÑEZ",
+    "PE?A": "PEÑA",
+    "CASTA?EDA": "CASTAÑEDA",
+    "ZU?IGA": "ZUÑIGA",
+    "MAGA?A": "MAGAÑA",
+    "SALDA?A": "SALDAÑA",
+    "YA?EZ": "YAÑEZ",
+    "PI?A": "PIÑA",
+    "TREVI?O": "TREVIÑO",
 }
 
 
@@ -14237,7 +14248,7 @@ REEMPLAZOS_NIVEL_3: Dict[str, str] = {
     "&QUOT;": '"',  
     "&APOS;": "'",
     "&LT;": "<",
-    "&GT;": ">"
+    "&GT;": ">",
 }
 
 # =============================================================================

@@ -89,6 +89,16 @@ TABLES_CONFIG: Dict[str, Dict[str, str]] = {
         "file_name": "AECF_0129_Anexo1_TablaB.csv.csv",
         "table_name": "ANEXO_2B_2025_2S",
         "separator": "|"
+    },
+    "1A_2023": {
+        "file_name": "AECF_0488_Anexo1.csv",
+        "table_name": "ANEXO_1A_2023", 
+        "separator": "|" 
+    },
+    "2B_2023": {
+        "file_name": "AECF_0488_Anexo2.csv",
+        "table_name": "ANEXO_2B_2023", 
+        "separator": "|" 
     }
 }
 

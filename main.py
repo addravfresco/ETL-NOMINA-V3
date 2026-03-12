@@ -75,7 +75,8 @@ def main() -> None:
     else:
         print("[INFO] Inicio de procesamiento desde el registro 0 (Cold Start).")
 
-    report = ETLReport()
+    es_reanudacion = filas_procesadas_historicas > 0
+    report = ETLReport(id_anexo=id_anexo, is_recovery=es_reanudacion)
 
     try:
         # =========================================================================
