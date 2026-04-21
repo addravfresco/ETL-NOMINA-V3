@@ -1,67 +1,121 @@
-"""
-Módulo de persistencia de estado transaccional (Bookmarking).
+"""Módulo de persistencia de estado transaccional (Bookmarking Avanzado).
 
-Gestiona la lectura y escritura de punteros de ejecución en formato JSON 
-para permitir la reanudación segura (Cold Resume) en arquitecturas de 
-procesamiento por lotes, mitigando la pérdida de avance ante interrupciones.
+Gestiona la lectura y escritura de punteros de ejecución para el pipeline de Nómina.
+Implementa memoria espacial (Byte Offset) para lograr una reanudación (Cold Resume) 
+en tiempo constante O(1), erradicando el costo de búsqueda secuencial en la 
+recuperación de archivos masivos tras una interrupción.
 """
+
+from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, TypedDict
 
 STATE_FILE = "estado_etl.json"
 
-
-def leer_estado(anexo_id: str) -> int:
-    """
-    Recupera el índice de la última fila procesada para un anexo específico.
+class CheckpointData(TypedDict):
+    """Estructura estricta del estado transaccional guardado en disco.
     
-    Implementa tolerancia a fallos ante corrupciones del archivo de estado 
-    (e.g., interrupción de I/O durante la escritura) retornando al inicio del archivo.
+    Attributes:
+        filas_procesadas (int): Cantidad de registros lógicos consolidados.
+        byte_offset (int): Coordenada física exacta en el archivo crudo.
+    """
+    filas_procesadas: int
+    byte_offset: int
+
+
+def leer_estado(anexo_id: str) -> tuple[int, int]:
+    """Recupera el índice de fila y la coordenada en bytes para un flujo específico.
+
+    Realiza una lectura segura del archivo de estado local. Implementa tolerancia 
+    a fallos por corrupción del archivo JSON y asegura compatibilidad con 
+    versiones anteriores del esquema de estado.
 
     Args:
-        anexo_id (str): Identificador único del flujo de datos (e.g., '1A', '2B').
+        anexo_id (str): Identificador único del flujo de datos (Ej. 'NOMINA_2024').
 
     Returns:
-        int: Coordenada de la fila donde debe reanudarse la lectura. Retorna 0 
-            si el estado no existe o el archivo presenta corrupción estructural.
+        tuple[int, int]: Tupla que contiene (filas_procesadas, byte_offset). 
+        Retorna (0, 0) si no existe estado previo o si el archivo está corrupto.
     """
     ruta_archivo = Path(STATE_FILE)
-    
+
     if not ruta_archivo.exists():
-        return 0
+        return 0, 0
 
     try:
-        with open(ruta_archivo, "r", encoding="utf-8") as file:
-            datos: Dict[str, Any] = json.load(file)
-            return datos.get(anexo_id, 0)
-    except json.JSONDecodeError:
-        return 0
+        with ruta_archivo.open("r", encoding="utf-8") as file:
+            datos: dict[str, dict[str, Any]] = json.load(file)
+            estado_anexo = datos.get(anexo_id, {})
+            
+            # Manejo de retrocompatibilidad con esquemas de estado heredados (Solo int)
+            if isinstance(estado_anexo, int):
+                return estado_anexo, 0
+                
+            return int(estado_anexo.get("filas_procesadas", 0)), int(estado_anexo.get("byte_offset", 0))
+            
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return 0, 0
 
 
-def guardar_estado(anexo_id: str, filas_procesadas: int) -> None:
-    """
-    Actualiza el puntero de ejecución del anexo en el archivo de estado global.
-    
-    Utiliza un patrón de lectura-modificación-escritura para preservar el estado
-    de otros anexos concurrentes o previos almacenados en el mismo artefacto.
+def guardar_estado(anexo_id: str, filas_procesadas: int, byte_offset: int) -> None:
+    """Actualiza el puntero de ejecución y la coordenada física en el estado global.
+
+    Serializa de manera segura el progreso del pipeline hacia el disco, permitiendo
+    operaciones de I/O eficientes y minimizando el riesgo de pérdida de datos.
 
     Args:
-        anexo_id (str): Identificador único del flujo de datos.
-        filas_procesadas (int): Sumatoria histórica de filas ingestas exitosamente.
+        anexo_id (str): Identificador único del flujo de datos en procesamiento.
+        filas_procesadas (int): Volumen de filas lógicas procesadas acumuladas.
+        byte_offset (int): Posición física exacta (seek) en el archivo crudo original.
     """
     ruta_archivo = Path(STATE_FILE)
-    datos: Dict[str, int] = {}
-    
+    datos: dict[str, Any] = {}
+
     if ruta_archivo.exists():
         try:
-            with open(ruta_archivo, "r", encoding="utf-8") as file:
+            with ruta_archivo.open("r", encoding="utf-8") as file:
                 datos = json.load(file)
         except json.JSONDecodeError:
-            pass 
-            
-    datos[anexo_id] = filas_procesadas
-    
-    with open(ruta_archivo, "w", encoding="utf-8") as file:
-        json.dump(datos, file, indent=4)
+            # Recreación del estado ante corrupción crítica del artefacto JSON
+            datos = {}
+
+    datos[anexo_id] = {
+        "filas_procesadas": filas_procesadas,
+        "byte_offset": byte_offset
+    }
+
+    with ruta_archivo.open("w", encoding="utf-8") as file:
+        json.dump(datos, file, indent=4, ensure_ascii=False)
+
+
+def eliminar_estado(anexo_id: str) -> None:
+    """Elimina el estado persistido de un anexo tras una consolidación exitosa.
+
+    Ejecuta la purga del punto de control específico dentro del artefacto JSON.
+    Si el documento queda vacío tras la eliminación, el archivo físico es 
+    removido para mantener la higiene del entorno de despliegue.
+
+    Args:
+        anexo_id (str): Identificador único del flujo de datos concluido.
+    """
+    ruta_archivo = Path(STATE_FILE)
+
+    if not ruta_archivo.exists():
+        return
+
+    try:
+        with ruta_archivo.open("r", encoding="utf-8") as file:
+            datos: dict[str, Any] = json.load(file)
+    except json.JSONDecodeError:
+        return
+
+    if anexo_id in datos:
+        del datos[anexo_id]
+
+    if datos:
+        with ruta_archivo.open("w", encoding="utf-8") as file:
+            json.dump(datos, file, indent=4, ensure_ascii=False)
+    else:
+        ruta_archivo.unlink(missing_ok=True)

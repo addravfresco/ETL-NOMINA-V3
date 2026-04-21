@@ -1,23 +1,48 @@
-# Entornos Virtuales
+# =========================================
+# 1. Entornos Virtuales
+# =========================================
 env/
 venv/
 .venv/
 ENV/
 
-# Archivos de Configuración Sensible (Contraseñas)
+# =========================================
+# 2. Archivos de Configuración Sensible
+# =========================================
 .env
+*.secret
+credentials.json
 
-# Archivos Temporales de Polars y ETL
+# =========================================
+# 3. Archivos Temporales de Polars y ETL
+# =========================================
 temp_processing/
 ESTRUCTURA_PROYECTO.txt
 estado_etl.json
 
-# Cache de Python
+# =========================================
+# 4. Cache de Python
+# =========================================
 **/__pycache__/
 *.py[cod]
+*$py.class
 
-# Logs y Reportes
+# =========================================
+# 5. Logs, Reportes y Datos generados
+# =========================================
+# Es mejor ignorar la carpeta completa donde caen los reportes, 
+# en lugar de bloquear las extensiones en todo el proyecto.
 logs/
-*.csv
-*.xlsx
-*.docx
+reports/
+
+# Ignorar archivos temporales ocultos que crea Office cuando tienes un Excel/Word abierto
+~$*.xlsx
+~$*.docx
+
+# =========================================
+# 6. Configuraciones de IDE y Sistema Operativo
+# =========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,96 +1,105 @@
-# SAT ETL Data Pipeline - Out-of-Core Processing
+# SAT ETL Data Pipeline V3 - Nómina Out-of-Core Processing
 
-Este repositorio contiene la arquitectura de Ingeniería de Datos para la ingesta, normalización masiva y persistencia (Upsert) de los anexos del SAT (e.g., Anexo 1A, Anexo 2B). Está diseñado bajo el estándar *Out-of-Core* utilizando **Polars**, lo que le permite procesar archivos planos superiores a 50 GB sin desbordar la memoria RAM del servidor.
+Este repositorio contiene la arquitectura de Ingeniería de Datos para la extracción, saneamiento masivo y consolidación transaccional de los anexos de Nómina del SAT (Tablas C, D, E, F y G).
 
-##  Características Principales
+La solución está diseñada bajo el estándar *Out-of-Core* utilizando el motor vectorial Polars (Rust) y conectores ADBC. Esta infraestructura permite procesar y cargar archivos planos de alta volumetría (superiores a 150 GB) hacia SQL Server sin exceder los límites de memoria RAM del host, garantizando la integridad referencial y la estabilidad del motor relacional.
 
-* **Evaluación Perezosa (Lazy Evaluation):** Escaneo de archivos masivos mediante fragmentación dinámica (*Batched Processing*).
-* **Sanitización Vectorizada:** Cacería y limpieza de anomalías de codificación (*Mojibake*) y caracteres irregulares a máxima velocidad.
-* **Tolerancia a Fallos (Bookmarking):** Implementación de puntos de control (*Checkpoints*) para reanudar el procesamiento en frío ante interrupciones de I/O.
-* **Carga Idempotente:** Operaciones lógicas de Staging y Upsert en SQL Server para garantizar una integridad referencial absoluta.
-* **Dead Letter Queue (DLQ):** Bifurcación en tiempo de ejecución para aislar registros corruptos o desbordamientos numéricos en una cuarentena auditable.
+---
 
-##  Prerrequisitos de Infraestructura
+## Características Principales
 
-* **Python:** 3.9+
-* **Controlador ODBC:** ODBC Driver 17 for SQL Server.
-* **Base de Datos:** SQL Server (On-Premise / Enterprise).
+* **Evaluación Vectorizada Out-of-Core:** Procesamiento de archivos masivos mediante fragmentación dinámica (Chunking) y lectura binaria de buffer para evadir cuellos de botella de I/O.
+* **Sanitización de Datos y Data Quality:** Rutinas de limpieza para anomalías de codificación (Mojibake), validación de estructuras fiscales (RFC/NSS) y auditoría de cuadratura contable de nómina.
+* **Espejo Milimétrico con DLQ:** Garantiza la ingesta del 100% de la volumetría original. Las anomalías se segregan en un Log Analítico (Dead Letter Queue) en SQL Server para su posterior auditoría forense.
+* **Resiliencia Transaccional O(1):** Implementación de punteros físicos (Byte Offsets) para reanudación instantánea ante interrupciones de red o fallos de infraestructura.
+* **Persistencia Blindada:** Motor de carga con fallback automático (ADBC -> SQLAlchemy) para asegurar la inyección de datos y el reporte detallado de errores de base de datos.
 
-##  Instalación y Configuración
+---
 
-1. **Clonar el repositorio y crear el entorno virtual:**
-   ```powershell
-   git clone <url_del_repositorio>
-   cd sat_etl_pipeline
-   python -m venv env
-   .\env\Scripts\activate
+## Prerrequisitos de Infraestructura
 
-2. Instalar dependencias:
+* **Lenguaje:** Python 3.9 o superior.
+* **Controlador de Base de Datos:** ODBC Driver 17 for SQL Server.
+* **Motor Relacional:** SQL Server (On-Premise / Enterprise).
+* **Almacenamiento:** Unidad de red (SMB) para archivos fuente y partición local de alto rendimiento (D: o V:) asignada al Swap transaccional de Polars.
 
+---
+
+## Instalación y Configuración
+
+**1. Clonación del repositorio y aprovisionamiento del entorno virtual:**
 ```powershell
-    pip install -r requirements.txt
-```
+git clone <url_del_repositorio>
+cd ETL-NOMINA-V3
+python -m venv venv
+.\venv\Scripts\activate
+
+2. Instalación de dependencias (Sincronización Estricta):
+Se requiere el uso de pip-tools para certificar la homogeneidad del entorno y la correcta instalación del conector ADBC.
+
+python -m pip install pip-tools
+python -m piptools sync requirements.txt
+
 3. Configuración de Variables de Entorno (.env):
-Cree un archivo .env en la raíz del proyecto basándose en la siguiente estructura:
+Cree un archivo .env en la raíz del proyecto respetando el siguiente contrato:
 
-```powershell
 DB_SERVER=IP_SERVIDOR\INSTANCIA,PUERTO
-DB_NAME=SAT_V2
+DB_NAME=SAT_NOMINA_V3
 DB_TRUSTED=NO
 DB_USER=usuario_etl
-DB_PASSWORD=secreto
+DB_PASSWORD=secreto_industrial
 DB_DRIVER={ODBC Driver 17 for SQL Server}
 
-SAT_RAW_DIR=\\ruta\de\red\Bases de Datos\SAT
+# Infraestructura de Almacenamiento
+SAT_RAW_DIR=\\servidor_red\SAT_DATA\NOMINA
 ETL_TEMP_DIR=D:\Temp_Polars
-```
-## Topología del Proyecto
-Estructura generada mediante project_mapper.py:
 
-```
-sat_etl_pipeline/
-├── env/                   # Entorno virtual aislado (Ignorado en Git)
-├── logs/                  # Artefactos de auditoría y archivos de cuarentena (DLQ)
-├── pkg/                   # Módulos Core del Pipeline
-│   ├── checkpoint.py      # Gestor de reanudación y estado
-│   ├── cleaning_rules.py  # Repositorio maestro de saneamiento léxico
-│   ├── config.py          # Enlace seguro con variables .env
-│   ├── enforcer.py        # Coerción estructural y Safe Casting
-│   ├── extract.py         # Motor de escaneo binario
-│   ├── globals.py         # Infraestructura de ejecución y mapeo DDL
-│   ├── load.py            # Motor de persistencia (Upsert SQL)
-│   ├── reports.py         # Sistema de telemetría y auditoría
-│   └── transform.py       # Reglas de negocio y bifurcación lógica
-├── scripts_operativos/    # Herramientas de SOP
-│   ├── contador.py        # Escáner de volumetría física
-│   ├── mojibake_hunter.py # Analizador forense de texto anómalo
-│   ├── profile_data.py    # Detector de Schema Drift y layouts
-│   └── project_mapper.py  # Utilitario de topología de directorios
-├── .env                   # Credenciales e infraestructura local
-├── estado_etl.json        # Archivo de control de progreso (Checkpoints)
-├── main.py                # Orquestador Unitario
-├── requirements.txt       # Dependencias estrictas
-└── run_all.py             # Orquestador de Secuencia Maestra (Fail-Fast)
-```
-## Operación del Pipeline
+Topología del Proyecto
+Estructura técnica generada mediante la arquitectura modular de la V3:
 
-**Ejecución Unitaria**
+Operación del Pipeline
+Ejecución Unitaria
+Para procesar un anexo específico definido en el diccionario maestro:
 
-Para iniciar el procesamiento de un único anexo configurado en TABLES_CONFIG (pkg/globals.py):
+python main.py NOMINA_3C_2025_1S
 
-```powershell
-python main.py 1A_2025_2S
-```
-**Ejecución en Cadena (Semestral)**
+Ejecución de Carga Masiva (Pipeline Secuencial)
+Para orquestar la cadena completa de anexos con protección de integridad:
 
-Para orquestar múltiples anexos con protección de integridad referencial:
-```powershell
-python run_all.py 1A_2025_2S 2B_2025_2S
-```
-**Auditoría Forense Pre-Vuelo (SOP)**
+ETL-NOMINA-V3/
+├── Data/                   # Manuales técnicos, diccionarios y reportes locales
+├── logs/                   # Artefactos de auditoría estática (.txt)
+├── pkg/                    # Core Engine del Pipeline
+│   ├── checkpoint.py       # Gestor de persistencia de estado y reanudación
+│   ├── cleaning_rules.py   # Diccionarios de saneamiento léxico
+│   ├── config.py           # Gestión de conectividad y Pool de SQL
+│   ├── consolidation.py    # Rutinas Set-Based (Staging -> Target)
+│   ├── enforcer.py         # Coerción de tipos y validación de esquemas
+│   ├── extract.py          # Extractor binario por bloques
+│   ├── globals.py          # Configuración maestra, rutas y DDL
+│   ├── load.py             # Motor de carga masiva (ADBC/SQLAlchemy)
+│   ├── reports.py          # Sistema de telemetría y monitoreo
+│   └── transform.py        # Motor de Data Quality y reglas de negocio
+├── scripts_operativos/     # Herramientas SOP (Standard Operating Procedures)
+│   ├── contador.py         # Validación de volumetría física
+│   ├── mojibake_hunter.py  # Analizador forense de texto anómalo
+│   ├── profile_sat.py      # Detector de Schema Drift y layouts
+│   └── project_mapper.py   # Renderizador de topología del repositorio
+├── .env                    # Variables de entorno y credenciales
+├── estado_etl.json         # Control de progreso transaccional
+├── main.py                 # Orquestador Unitario
+├── requirements.txt        # Manifiesto de dependencias certificado
+└── run_all.py              # Orquestador Maestro Secuencial (Fail-Fast)
 
-Antes de ingresar nuevos layouts, valide el esquema y detecte Mojibake residual:
-```powershell
-python scripts_operativos/profile_data.py NombreArchivoSAT.csv
-python scripts_operativos/mojibake_hunter.py NombreArchivoSAT.csv
-```
+# Ejecuta la secuencia histórica predeterminada (2023 - 2025)
+python run_all.py
+
+Auditoría Forense (SOP)
+Antes de procesar nuevos archivos, valide la integridad estructural:
+
+# Evaluar densidad de datos y tipos
+python scripts_operativos/profile_sat.py ArchivoNomina.csv
+
+# Identificar patrones de corrupción de caracteres
+python scripts_operativos/mojibake_hunter.py ArchivoNomina.csv
+

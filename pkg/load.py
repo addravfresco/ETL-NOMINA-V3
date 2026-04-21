@@ -1,112 +1,140 @@
-"""
-Módulo de persistencia masiva y carga idempotente (Upsert).
+"""Módulo de persistencia masiva - Staging y Data Quality (Vertical Nómina).
 
-Implementa la arquitectura de Staging-to-Production para garantizar cargas
-masivas de alto volumen hacia SQL Server. Ejecuta rutinas de de-duplicación 
-intra-lote (Window Functions) y validación transaccional contra la tabla destino
-para mantener la integridad referencial absoluta.
+Implementa mecanismos de inyección masiva (Bulk Insert) hacia tablas de Staging
+utilizando conectores de alto rendimiento (ADBC) con estrategias de tolerancia
+a fallos (Fallback a SQLAlchemy). Garantiza la persistencia de la volumetría
+total y de la bitácora analítica generada por el motor de calidad de datos.
 """
+
+from __future__ import annotations
 
 import polars as pl
-from sqlalchemy import create_engine, text
+from sqlalchemy import exc
 
-from pkg.config import get_connection_string
+from pkg.config import get_connection_string, get_engine
 
-# Inicialización global del motor de conexión.
-# El parámetro fast_executemany es crítico para habilitar la inserción
-# masiva en bloque (Bulk Insert) a nivel del driver ODBC.
-engine = create_engine(get_connection_string(), fast_executemany=True)
+
+def build_staging_table_name(table_name: str) -> str:
+    """Genera el identificador estandarizado para la tabla de staging.
+
+    Args:
+        table_name (str): Nombre base de la tabla lógica destino.
+
+    Returns:
+        str: Nombre de la tabla temporal prefijada con 'STG_'.
+    """
+    return f"STG_{table_name}"
 
 
 def upload_to_sql_blindado(df: pl.DataFrame, table_name: str, anexo_id: str) -> None:
-    """
-    Ejecuta una carga transaccional hacia SQL Server con resolución de conflictos.
+    """Inserta un lote de datos en la tabla Staging con tolerancia a fallos.
 
-    Implementa un patrón ELT (Extract, Load, Transform) volcando el bloque de
-    memoria a una tabla temporal (Staging). Posteriormente, ejecuta sentencias
-    SQL nativas para de-duplicar los registros físicamente leídos y descartar
-    aquellos que ya existen en el Data Warehouse.
+    Utiliza el conector ADBC (Arrow Database Connectivity) como motor principal
+    para maximizar la velocidad de transferencia. En caso de rechazo por anomalías
+    estrictas del lado del servidor, implementa un fallback estructural hacia 
+    SQLAlchemy para recuperar el rastro del error original (Stack Trace) y 
+    purgar el pool de conexiones envenenadas.
 
     Args:
-        df (pl.DataFrame): Lote de datos normalizado y tipado.
-        table_name (str): Nombre de la tabla destino en producción.
-        anexo_id (str): Identificador del flujo para aplicar reglas específicas de llave primaria.
+        df (pl.DataFrame): Lote de datos vectorizado a inyectar en la base de datos.
+        table_name (str): Nombre base de la tabla lógica destino.
+        anexo_id (str): Identificador del flujo de datos actual.
 
     Raises:
-        ValueError: Si el anexo proporcionado no tiene una estrategia de Upsert definida.
+        Exception: Propaga la excepción original detectada por ADBC o SQLAlchemy
+            tras haber documentado el diagnóstico forense en la salida estándar.
     """
     if df.is_empty():
         return
 
-    stg_table = f"STG_{table_name}"
+    stg_table = build_staging_table_name(table_name)
 
-    # Limpieza preventiva del área de Staging para evitar colisiones
-    # entre hilos de ejecución o cargas previas abortadas.
-    with engine.begin() as conn:
-        conn.execute(
-            text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL TRUNCATE TABLE {stg_table};")
+    try:
+        # Ejecución primaria de alta velocidad vía ADBC
+        uri = get_connection_string().replace("mssql+pyodbc", "mssql")
+        df.write_database(
+            table_name=stg_table,
+            connection=uri,
+            if_table_exists="append",
+            engine="adbc"
         )
+    except Exception as e_adbc:
+        # Fallback diagnóstico: SQLAlchemy evalúa la integridad del lote y del pool
+        engine = get_engine()
+        try:
+            df.write_database(
+                table_name=stg_table,
+                connection=engine,
+                if_table_exists="append",
+                engine="sqlalchemy"
+            )
+        except exc.PendingRollbackError:
+            engine.dispose()
+            print(f"\n[CRÍTICO] Inconsistencia transaccional detectada. Pool reiniciado para la tabla {stg_table}.")
+            print("\n" + "="*80)
+            print("[DIAGNÓSTICO FORENSE] El motor de SQL Server rechazó el lote. Causa raíz:")
+            print(str(e_adbc))
+            print("="*80 + "\n")
+            raise
+        except Exception as e_sql:
+            engine.dispose()
+            print("\n" + "="*80)
+            print(f"[DIAGNÓSTICO FORENSE] Fallo crítico durante inyección masiva en {stg_table}.")
+            print(str(e_sql))
+            print("="*80 + "\n")
+            raise
 
-    # Volcado masivo a Staging. La columna técnica 'FilaOrigen' se transfiere
-    # temporalmente para permitir el ordenamiento determinista en base de datos.
-    df.write_database(
-        table_name=stg_table,
-        connection=engine,
-        if_table_exists="replace",
-        engine="sqlalchemy"
-    )
 
-    # Resolución transaccional y mezcla (Merge)
-    with engine.begin() as conn:
-        # Aislamiento de columnas reales (excluyendo FilaOrigen) para la inserción final
-        cols_destino = [col for col in df.columns if col != "FilaOrigen"]
-        columnas_insert = ", ".join([f"[{col}]" for col in cols_destino])
+def upload_dq_log_sql(df_dq_log: pl.DataFrame, table_name: str) -> None:
+    """Inyecta la bitácora analítica de Data Quality en SQL Server.
 
-        if anexo_id.startswith("1A"):
-            # Estrategia Anexo 1A (Cabeceras): De-duplicación fundamentada en el UUID.
-            upsert_query = f"""
-                INSERT INTO {table_name} ({columnas_insert})
-                SELECT {columnas_insert} FROM (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY [UUID] ORDER BY [FilaOrigen] ASC) as rn
-                    FROM {stg_table}
-                ) AS Stg
-                WHERE rn = 1
-                AND NOT EXISTS (
-                    SELECT 1 FROM {table_name} AS Dest
-                    WHERE Dest.UUID = Stg.UUID
-                );
-            """
+    Aplica el mismo patrón de resiliencia (ADBC -> SQLAlchemy Fallback) utilizado 
+    en la carga de Staging para garantizar que los metadatos de anomalías no se 
+    pierdan ante inestabilidades de red o bloqueos de transacciones.
 
-        elif anexo_id.startswith("2B"):
-            # Estrategia Anexo 2B (Detalles): De-duplicación y generación de llave sintética.
-            # Dado que el SAT no provee ID de detalle, se calcula un Hash SHA-256 compuesto.
-            upsert_query = f"""
-                WITH CalculoHash AS (
-                    SELECT
-                        CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', CONCAT([UUID], '|', [ConceptoClaveProdServ], '|', [ConceptoImporte], '|', [FilaOrigen])), 2) as NewHash,
-                        *
-                    FROM {stg_table}
-                ),
-                Unicos AS (
-                    SELECT *, ROW_NUMBER() OVER (PARTITION BY NewHash ORDER BY [FilaOrigen] ASC) as rn
-                    FROM CalculoHash
-                )
-                INSERT INTO {table_name} ([HashID], {columnas_insert})
-                SELECT NewHash, {columnas_insert}
-                FROM Unicos
-                WHERE rn = 1
-                AND NOT EXISTS (
-                    SELECT 1 FROM {table_name} AS Dest
-                    WHERE Dest.HashID = Unicos.NewHash
-                );
-            """
-        else:
-            raise ValueError(f"El prefijo del anexo '{anexo_id}' carece de una estrategia de Upsert configurada.")
+    Args:
+        df_dq_log (pl.DataFrame): Colección de alertas y registros anómalos.
+        table_name (str): Nombre base de la tabla lógica asociada a los logs.
 
-        # Ejecución del motor transaccional
-        conn.execute(text(upsert_query))
+    Raises:
+        Exception: Propaga excepciones críticas de I/O tras reiniciar el motor.
+    """
+    if df_dq_log.is_empty():
+        return
+        
+    dq_table = f"DQ_LOG_{table_name}"
 
-        # Destrucción del área de Staging post-carga
-        conn.execute(
-            text(f"IF OBJECT_ID('{stg_table}', 'U') IS NOT NULL DROP TABLE {stg_table};")
+    try:
+        # Ejecución primaria de alta velocidad vía ADBC
+        uri = get_connection_string().replace("mssql+pyodbc", "mssql")
+        df_dq_log.write_database(
+            table_name=dq_table,
+            connection=uri,
+            if_table_exists="append",
+            engine="adbc"
         )
+    except Exception as e_adbc:
+        # Fallback diagnóstico para la bitácora
+        engine = get_engine()
+        try:
+            df_dq_log.write_database(
+                table_name=dq_table,
+                connection=engine,
+                if_table_exists="append",
+                engine="sqlalchemy"
+            )
+        except exc.PendingRollbackError:
+            engine.dispose()
+            print(f"\n[CRÍTICO] Inconsistencia transaccional detectada. Pool reiniciado para el log {dq_table}.")
+            print("\n" + "="*80)
+            print("[DIAGNÓSTICO FORENSE] El motor de SQL Server rechazó el lote de bitácora. Causa raíz:")
+            print(str(e_adbc))
+            print("="*80 + "\n")
+            raise
+        except Exception as e_sql:
+            engine.dispose()
+            print("\n" + "="*80)
+            print(f"[DIAGNÓSTICO FORENSE] Fallo crítico durante inyección analítica en {dq_table}.")
+            print(str(e_sql))
+            print("="*80 + "\n")
+            raise
